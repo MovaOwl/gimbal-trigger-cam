@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "io.github.movaowl.gimbaltrigger"
-        minSdk = 23
+        minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3-scout"
+        versionCode = 4
+        versionName = "1.0"
     }
 
     // Фиксированный debug-ключ в репозитории: APK из каждой сборки
@@ -40,4 +40,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }
