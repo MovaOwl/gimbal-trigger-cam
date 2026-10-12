@@ -55,7 +55,8 @@ import java.util.UUID
 class MainActivity : Activity() {
 
     companion object {
-        private const val APP_VERSION = "0.1-scout"
+        private const val APP_VERSION = "0.2-scout"
+        private const val TELEMETRY_TYPE = "00 FF 1E 00"
         private const val REQ_PERMS = 1
         private const val MAX_SHOWN_LINES = 400
         private const val SCAN_MS = 15_000L
@@ -105,6 +106,16 @@ class MainActivity : Activity() {
     private val mutedCount = HashMap<String, Int>()
     private val lastPayload = HashMap<String, String>()
     private val repeatCount = HashMap<String, Int>()
+
+    // Сборка кадров протокола Feiyu: A5 5A, 4 байта типа, длина (2 байта BE),
+    // данные, 3 служебных байта. Полная длина = len + 11.
+    private lateinit var rawBox: CheckBox
+    private val rxBuf = HashMap<String, ByteArray>()
+    private val seenTypes = LinkedHashMap<String, Int>()      // тип → всего кадров
+    private val typeCountSinceMark = LinkedHashMap<String, Int>()
+    private val frameLast = HashMap<String, String>()
+    private val frameRepeat = HashMap<String, Int>()
+    private val mutedTypes = mutableSetOf(TELEMETRY_TYPE)
 
     // Журнал
     private val fullLog = StringBuilder()
@@ -167,7 +178,7 @@ class MainActivity : Activity() {
 
         root.addView(row(
             button("Метка") { showMarkDialog() },
-            button("Шумные каналы") { showMuteDialog() },
+            button("Фильтр") { showMuteDialog() },
         ))
         root.addView(row(
             button("Поделиться") { shareLog() },
@@ -180,6 +191,12 @@ class MainActivity : Activity() {
             isChecked = true
         }
         root.addView(dedupeBox)
+
+        rawBox = CheckBox(this).apply {
+            text = "Сырые пакеты (без сборки кадров)"
+            isChecked = false
+        }
+        root.addView(rawBox)
 
         writeSpinner = Spinner(this)
         writeInput = EditText(this).apply {
@@ -236,6 +253,9 @@ class MainActivity : Activity() {
         lastPayload.clear()
         repeatCount.clear()
         mutedCount.clear()
+        frameLast.clear()
+        frameRepeat.clear()
+        typeCountSinceMark.clear()
         logView.text = ""
     }
 
@@ -296,25 +316,39 @@ class MainActivity : Activity() {
 
     private fun mark(text: String) {
         flushRepeats()
-        lastPayload.clear() // после метки показываем первое сообщение каждого канала заново
+        if (typeCountSinceMark.isNotEmpty()) {
+            log("   кадров с прошлой метки: " + typeCountSinceMark.entries.joinToString { "[${it.key}]×${it.value}" })
+            typeCountSinceMark.clear()
+        }
+        lastPayload.clear() // после метки показываем первое сообщение каждого канала/типа заново
+        frameLast.clear()
         log("========== МЕТКА: $text ==========")
     }
 
     private fun showMuteDialog() {
-        if (notifyChars.isEmpty()) {
+        if (notifyChars.isEmpty() && seenTypes.isEmpty()) {
             Toast.makeText(this, "Сначала подключитесь к гимбалу", Toast.LENGTH_SHORT).show()
             return
         }
-        val labels = notifyChars.map { label(it) }.toTypedArray()
-        val keys = notifyChars.map { key(it) }
-        val checked = BooleanArray(keys.size) { keys[it] in muted }
+        // Пункты: типы кадров, затем каналы целиком
+        val types = seenTypes.keys.toList()
+        val chKeys = notifyChars.map { key(it) }
+        val labels = (types.map { "кадр [$it]  ×${seenTypes[it]}" } +
+            notifyChars.map { "весь канал ${label(it)}" }).toTypedArray()
+        val checked = BooleanArray(labels.size) { i ->
+            if (i < types.size) types[i] in mutedTypes else chKeys[i - types.size] in muted
+        }
         AlertDialog.Builder(this)
-            .setTitle("Не показывать каналы")
+            .setTitle("Что скрывать")
             .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
             .setPositiveButton("OK") { _, _ ->
+                mutedTypes.clear()
                 muted.clear()
-                keys.forEachIndexed { i, k -> if (checked[i]) muted.add(k) }
-                log("Заглушено каналов: ${muted.size}")
+                checked.forEachIndexed { i, on ->
+                    if (!on) return@forEachIndexed
+                    if (i < types.size) mutedTypes.add(types[i]) else muted.add(chKeys[i - types.size])
+                }
+                log("Скрыто типов кадров: ${mutedTypes.size}, каналов: ${muted.size}")
             }
             .setNegativeButton("Отмена", null)
             .show()
@@ -444,6 +478,8 @@ class MainActivity : Activity() {
         resetQueue()
         notifyChars.clear()
         writeChars.clear()
+        rxBuf.clear()
+        frameLast.clear()
         updateWriteSpinner()
         val name = try { device.name } catch (_: Exception) { null }
         log("== Подключаюсь к ${name ?: "?"} ${device.address}")
@@ -570,6 +606,7 @@ class MainActivity : Activity() {
         for (c in notifyChars) enqueue("подписка ${label(c)}") { subscribe(g, c) }
         enqueue("готово") {
             log("== Готово: подписан на ${notifyChars.size} канал(ов). Ставьте «Метку» и нажимайте кнопки на гимбале.")
+            log("   Телеметрия углов [$TELEMETRY_TYPE] скрыта — показать можно в «Фильтре».")
             setStatus("Слушаю гимбал · каналов: ${notifyChars.size}")
             false
         }
@@ -605,6 +642,10 @@ class MainActivity : Activity() {
             mutedCount[label(c)] = (mutedCount[label(c)] ?: 0) + 1
             return
         }
+        if (!rawBox.isChecked) {
+            feedFrames(k, label(c), v)
+            return
+        }
         val h = hex(v)
         if (dedupeBox.isChecked && lastPayload[k] == h) {
             repeatCount[k] = (repeatCount[k] ?: 0) + 1
@@ -615,10 +656,75 @@ class MainActivity : Activity() {
         log("← ${label(c)} [${v.size}] $h${ascii(v)}")
     }
 
+    private fun isHeader(b: ByteArray, i: Int) =
+        i + 1 < b.size && b[i] == 0xA5.toByte() && b[i + 1] == 0x5A.toByte()
+
+    private fun findHeader(b: ByteArray, from: Int = 0): Int {
+        for (i in from until b.size - 1) if (isHeader(b, i)) return i
+        return -1
+    }
+
+    /** Склеивает пакеты BLE в кадры A5 5A … (полная длина = len + 11). */
+    private fun feedFrames(k: String, lbl: String, v: ByteArray) {
+        var b = rxBuf[k] ?: ByteArray(0)
+        // Новый пакет начинается с заголовка, а в буфере незаконченный кадр — выводим его как есть.
+        if (b.isNotEmpty() && isHeader(v, 0)) {
+            onFrame(lbl, b, incomplete = true)
+            b = ByteArray(0)
+        }
+        b += v
+        while (true) {
+            val start = findHeader(b)
+            if (start < 0) {
+                if (b.isNotEmpty()) log("? $lbl вне кадра: ${hex(b)}")
+                b = ByteArray(0)
+                break
+            }
+            if (start > 0) {
+                log("? $lbl вне кадра: ${hex(b.copyOfRange(0, start))}")
+                b = b.copyOfRange(start, b.size)
+            }
+            if (b.size < 8) break
+            val len = ((b[6].toInt() and 0xFF) shl 8) or (b[7].toInt() and 0xFF)
+            val total = len + 11
+            if (len > 1024) {
+                log("? $lbl странная длина $len: ${hex(b)}")
+                b = b.copyOfRange(2, b.size)
+                continue
+            }
+            if (b.size < total) break
+            onFrame(lbl, b.copyOfRange(0, total), incomplete = false)
+            b = b.copyOfRange(total, b.size)
+        }
+        rxBuf[k] = b
+    }
+
+    private fun onFrame(lbl: String, f: ByteArray, incomplete: Boolean) {
+        if (f.size < 6) {
+            log("? $lbl обрывок: ${hex(f)}")
+            return
+        }
+        val type = hex(f.copyOfRange(2, 6))
+        seenTypes[type] = (seenTypes[type] ?: 0) + 1
+        typeCountSinceMark[type] = (typeCountSinceMark[type] ?: 0) + 1
+        if (type in mutedTypes) return
+        val body = if (f.size > 6) hex(f.copyOfRange(6, f.size)) else ""
+        if (dedupeBox.isChecked && frameLast[type] == body) {
+            frameRepeat[type] = (frameRepeat[type] ?: 0) + 1
+            return
+        }
+        frameRepeat.remove(type)?.let { if (it > 0) log("   … [$type] без изменений ×$it") }
+        val first = !frameLast.containsKey(type) && (seenTypes[type] ?: 0) == 1
+        frameLast[type] = body
+        log("◆ [$type] $body${if (incomplete) "  (неполный)" else ""}${if (first) "  ← новый тип" else ""}")
+    }
+
     private fun flushRepeats() {
         val labels = notifyChars.associateBy({ key(it) }, { label(it) })
         for ((k, n) in repeatCount) if (n > 0) log("   … ${labels[k] ?: k}: предыдущее повторилось ещё ×$n")
         repeatCount.clear()
+        for ((t, n) in frameRepeat) if (n > 0) log("   … [$t] без изменений ×$n")
+        frameRepeat.clear()
     }
 
     // ------------------------------------------------------------------ запись

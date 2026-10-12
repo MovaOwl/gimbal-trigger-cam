@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.movaowl.gimbaltrigger"
         minSdk = 23
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1-scout"
+        versionCode = 2
+        versionName = "0.2-scout"
     }
 
     // Фиксированный debug-ключ в репозитории: APK из каждой сборки
