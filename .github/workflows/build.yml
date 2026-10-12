@@ -1,0 +1,48 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk gimbal-trigger-cam.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gimbal-trigger-cam-apk
+          path: gimbal-trigger-cam.apk
+
+      # Постоянная ссылка на свежий APK:
+      # https://github.com/<owner>/<repo>/releases/download/latest/gimbal-trigger-cam.apk
+      - name: Publish "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest gimbal-trigger-cam.apk \
+            --target "${{ github.sha }}" \
+            --title "Свежая сборка" \
+            --notes "Автосборка из коммита ${{ github.sha }}. Скачайте gimbal-trigger-cam.apk и установите поверх прошлой версии." \
+            --prerelease
