@@ -8,7 +8,7 @@ import java.util.Date
 import java.util.Locale
 
 object BuildInfo {
-    const val VERSION = "1.1"
+    const val VERSION = "1.2"
 }
 
 /** Что делать по курку. Все действия выполняются через Shizuku (права ADB). */

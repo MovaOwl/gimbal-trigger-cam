@@ -187,6 +187,7 @@ class ScoutActivity : Activity() {
             button("Метка") { showMarkDialog() },
             button("Фильтр") { showMuteDialog() },
             button("Фон заново") { if (gatt != null) startLearning() },
+            button("Зонд") { runProbe() },
         ))
         root.addView(row(
             button("Поделиться") { shareLog() },
@@ -534,14 +535,19 @@ class ScoutActivity : Activity() {
 
     /** Пишет кадр «статус приложения» в канал записи FF01 (без ответа). */
     private fun sendAppStatus(foreground: Boolean) {
-        val g = gatt ?: return
-        val c = writeChars.firstOrNull { it.uuid.toString().startsWith("0000ff01") } ?: return
         val bytes = Ak.appStatus(foreground)
         if (!appStatusLogged) {
             log("→ статус приложения: ${hex(bytes)}")
             appStatusLogged = true
         }
-        enqueue("статус приложения") {
+        sendRaw("статус приложения", bytes)
+    }
+
+    /** Отправляет готовый кадр в канал записи FF01 (без ответа). */
+    private fun sendRaw(name: String, bytes: ByteArray): Boolean {
+        val g = gatt ?: return false
+        val c = writeChars.firstOrNull { it.uuid.toString().startsWith("0000ff01") } ?: return false
+        enqueue(name) {
             if (Build.VERSION.SDK_INT >= 33) {
                 g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
             } else {
@@ -550,6 +556,54 @@ class ScoutActivity : Activity() {
                 g.writeCharacteristic(c)
             }
         }
+        return true
+    }
+
+    // ------------------------------------------------------------------ зонд
+
+    /** Только запросы на чтение (get) — гимбал ничего не меняет, лишь отвечает. */
+    private val probeList: List<Triple<String, Int, Pair<Int, ByteArray>>> = buildList {
+        for (t in listOf(0, 1, 2, 4, 6, 9, 13, 15, 17, 18)) add(Triple("инфо об устройстве @$t", t, 33 to ByteArray(0)))
+        add(Triple("BLE-камеры: поиск (состояние)", 6, 155 to ByteArray(0)))
+        add(Triple("BLE-камеры: подключение", 6, 156 to ByteArray(0)))
+        add(Triple("версия Bluetooth-модуля", 6, 25 to ByteArray(0)))
+        add(Triple("Wi-Fi/Bluetooth вкл/выкл", 12, 112 to ByteArray(0)))
+        add(Triple("кнопки: состояние", 4, 22 to ByteArray(0)))
+        add(Triple("кнопки: тип прошивки", 4, 27 to ByteArray(0)))
+        add(Triple("кнопки: версия", 4, 15 to ByteArray(0)))
+        add(Triple("кнопки: текущая камера", 4, 20 to ByteArray(0)))
+        add(Triple("кнопки: поддерживаемые камеры", 4, 23 to ByteArray(0)))
+        add(Triple("кнопки: режим камеры", 4, 24 to ByteArray(0)))
+        add(Triple("кнопки: подробно", 4, 71 to ByteArray(0)))
+        add(Triple("колесо: тип управления", 4, 64 to ByteArray(0)))
+        add(Triple("USB: управление камерой", 9, 137 to ByteArray(0)))
+        add(Triple("польз. параметр: функция курка", 2, 32 to byteArrayOf(36)))
+        add(Triple("польз. параметр: кнопка режима ×1", 2, 32 to byteArrayOf(40)))
+        add(Triple("польз. параметр: кнопка M", 2, 32 to byteArrayOf(45)))
+        add(Triple("польз. параметр: курок 2 ×1", 2, 32 to byteArrayOf(42)))
+    }
+
+    private fun runProbe() {
+        if (gatt == null || writeChars.isEmpty()) {
+            Toast.makeText(this, "Сначала подключитесь к гимбалу", Toast.LENGTH_SHORT).show()
+            return
+        }
+        clearFrameMemory()
+        log("========== ЗОНД: ${probeList.size} запросов на чтение ==========")
+        probeList.forEachIndexed { i, (name, target, cmd) ->
+            handler.postDelayed({
+                val bytes = Ak.frame(target, 2, cmd.first, cmd.second)
+                log("? $name → ${hex(bytes)}")
+                sendRaw(name, bytes)
+            }, i * 400L)
+        }
+        handler.postDelayed({ log("========== ЗОНД: готово, ответы выше (строки «ответ get») ==========") }, probeList.size * 400L + 1500)
+    }
+
+    /** Чтобы ответы зонда показывались, даже если такой тип кадра уже был. */
+    private fun clearFrameMemory() {
+        flushRepeats()
+        frameLast.clear()
     }
 
     override fun onDestroy() {
