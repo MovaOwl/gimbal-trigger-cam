@@ -111,6 +111,8 @@ class ScoutActivity : Activity() {
     // Сборка кадров протокола Feiyu: A5 5A, 4 байта типа, длина (2 байта BE),
     // данные, 3 служебных байта. Полная длина = len + 11.
     private lateinit var rawBox: CheckBox
+    private lateinit var appStatusBox: CheckBox
+    private var appStatusLogged = false
     private val rxBuf = HashMap<String, ByteArray>()
     private val seenTypes = LinkedHashMap<String, Int>()      // тип → всего кадров
     private val typeCountSinceMark = LinkedHashMap<String, Int>()
@@ -203,6 +205,18 @@ class ScoutActivity : Activity() {
             isChecked = false
         }
         root.addView(rawBox)
+
+        appStatusBox = CheckBox(this).apply {
+            text = "Представляться приложением Feiyu (статус раз в секунду)"
+            isChecked = false
+            setOnCheckedChangeListener { _, on ->
+                appStatusLogged = false
+                if (!on) sendAppStatus(false)
+                log(if (on) "~~ Включено: шлю «приложение на экране» раз в секунду" else "~~ Выключено: послал «приложение свёрнуто»")
+            }
+        }
+        root.addView(appStatusBox)
+        handler.postDelayed(appStatusTicker, 1000)
 
         writeSpinner = Spinner(this)
         writeInput = EditText(this).apply {
@@ -511,7 +525,35 @@ class ScoutActivity : Activity() {
         }, 1500)
     }
 
+    private val appStatusTicker = object : Runnable {
+        override fun run() {
+            if (::appStatusBox.isInitialized && appStatusBox.isChecked) sendAppStatus(true)
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    /** Пишет кадр «статус приложения» в канал записи FF01 (без ответа). */
+    private fun sendAppStatus(foreground: Boolean) {
+        val g = gatt ?: return
+        val c = writeChars.firstOrNull { it.uuid.toString().startsWith("0000ff01") } ?: return
+        val bytes = Ak.appStatus(foreground)
+        if (!appStatusLogged) {
+            log("→ статус приложения: ${hex(bytes)}")
+            appStatusLogged = true
+        }
+        enqueue("статус приложения") {
+            if (Build.VERSION.SDK_INT >= 33) {
+                g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
+            } else {
+                c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                c.value = bytes
+                g.writeCharacteristic(c)
+            }
+        }
+    }
+
     override fun onDestroy() {
+        handler.removeCallbacks(appStatusTicker)
         stopScan()
         gatt?.close()
         gatt = null
@@ -576,7 +618,7 @@ class ScoutActivity : Activity() {
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) = ui {
-            log("→ запись в ${label(c)}: status=$status")
+            if (status != BluetoothGatt.GATT_SUCCESS) log("! запись в ${label(c)}: status=$status")
             opDone()
         }
 
@@ -691,8 +733,8 @@ class ScoutActivity : Activity() {
                 log("? $lbl вне кадра: ${hex(b.copyOfRange(0, start))}")
                 b = b.copyOfRange(start, b.size)
             }
-            if (b.size < 8) break
-            val len = ((b[6].toInt() and 0xFF) shl 8) or (b[7].toInt() and 0xFF)
+            if (b.size < 9) break
+            val len = (b[7].toInt() and 0xFF) or ((b[8].toInt() and 0xFF) shl 8)
             val total = len + 11
             if (len > 1024) {
                 log("? $lbl странная длина $len: ${hex(b)}")
@@ -725,6 +767,7 @@ class ScoutActivity : Activity() {
         val first = !frameLast.containsKey(type) && (seenTypes[type] ?: 0) == 1
         frameLast[type] = body
         log("◆ [$type] $body${if (incomplete) "  (неполный)" else ""}${if (first) "  ← новый тип" else ""}")
+        if (!incomplete) log("   ↳ ${Ak.describe(f)}")
     }
 
     // ------------------------------------------------------------------ детектор «спокойных» байтов
