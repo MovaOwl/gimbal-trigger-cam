@@ -8,7 +8,7 @@ import java.util.Date
 import java.util.Locale
 
 object BuildInfo {
-    const val VERSION = "1.2"
+    const val VERSION = "1.3"
 }
 
 /** Что делать по курку. Все действия выполняются через Shizuku (права ADB). */
@@ -43,6 +43,13 @@ object Prefs {
 
     fun thresholdMs(c: Context) = p(c).getInt("threshold", 1200)
     fun setThresholdMs(c: Context, v: Int) = p(c).edit().putInt("threshold", v).apply()
+
+    /** Действие по кнопке ⇄ (переключение функции колеса). */
+    fun knobButtonAction(c: Context) = action(c, "knobAction", GAction.SHUTTER)
+
+    /** Возвращать колесу прежнюю функцию после нажатия ⇄. */
+    fun keepKnob(c: Context) = p(c).getBoolean("keepKnob", true)
+    fun setKeepKnob(c: Context, v: Boolean) = p(c).edit().putBoolean("keepKnob", v).apply()
 
     fun vibrate(c: Context) = p(c).getBoolean("vibrate", true)
     fun setVibrate(c: Context, v: Boolean) = p(c).edit().putBoolean("vibrate", v).apply()
@@ -114,7 +121,7 @@ object Ak {
         32 to "польз. параметры", 31 to "сист. параметры", 33 to "инфо об устройстве", 38 to "версия прошивки",
         49 to "сброс настроек", 50 to "режим следования", 51 to "режим использования", 63 to "снимок/камера",
         73 to "USB-камера", 79 to "ошибка", 80 to "СОБЫТИЕ КНОПКИ", 83 to "селфи", 93 to "поворот на угол",
-        97 to "сброс положения", 113 to "управление движением", 114 to "статус приложения",
+        97 to "сброс положения", 129 to "колесо: функция (кнопка ⇄)", 149 to "отметки A/B/C", 113 to "управление движением", 114 to "статус приложения",
         115 to "поворот относит.", 119 to "предупреждение", 153 to "пульс",
     )
     val TYPE_NAMES = listOf("push", "set", "get", "ответ set", "ответ get")

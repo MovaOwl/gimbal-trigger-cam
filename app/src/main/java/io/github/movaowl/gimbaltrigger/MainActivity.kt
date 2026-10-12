@@ -145,7 +145,7 @@ class MainActivity : Activity() {
             textSize = 22f
             setTypeface(typeface, Typeface.BOLD)
         })
-        root.addView(label("Feiyu Scorp-C · v${BuildInfo.VERSION}. Зажатие курка (режим Lock) нажимает спуск стандартной камеры."))
+        root.addView(label("Feiyu Scorp-C · v${BuildInfo.VERSION}. Кнопка ⇄ или удержание курка нажимает спуск стандартной камеры."))
 
         // 1. Shizuku
         root.addView(header("1. Shizuku"))
@@ -172,8 +172,18 @@ class MainActivity : Activity() {
             textSize = 12f
         })
 
-        // Настройки
-        root.addView(header("Настройки"))
+        // Кнопка ⇄
+        root.addView(header("Кнопка ⇄ (под большим пальцем)"))
+        root.addView(label("Одиночное нажатие кнопки со стрелками ⇄ рядом с FPV.").apply { textSize = 12f })
+        root.addView(actionRow("Действие по кнопке ⇄", "knobAction", Prefs.knobButtonAction(this)))
+        root.addView(CheckBox(this).apply {
+            text = "Не менять функцию колеса (возвращать после нажатия)"
+            isChecked = Prefs.keepKnob(this@MainActivity)
+            setOnCheckedChangeListener { _, v -> Prefs.setKeepKnob(this@MainActivity, v) }
+        })
+
+        // Настройки курка
+        root.addView(header("Курок (удержание)"))
         val modes = listOf("Сразу, как только курок зажат", "При отпускании: короткое / длинное")
         root.addView(spinnerRow("Когда срабатывать", modes, if (Prefs.fireOnRelease(this)) 1 else 0) {
             Prefs.setFireOnRelease(this, it == 1)

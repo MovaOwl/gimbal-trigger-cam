@@ -41,6 +41,8 @@ class GimbalService : Service() {
         private const val ACTION_STOP = "io.github.movaowl.gimbaltrigger.STOP"
         private val SVC: UUID = UUID.fromString("0000ffff-0000-1000-8000-00805f9b34fb")
         private val NOTIFY_CHAR: UUID = UUID.fromString("0000ff02-0000-1000-8000-00805f9b34fb")
+        private val WRITE_CHAR: UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34fb")
+        private const val CMD_ROLLER = 129
         private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         @Volatile
@@ -245,8 +247,12 @@ class GimbalService : Service() {
                 ready = true
                 attempt = 0
                 lastFrameAt = SystemClock.elapsedRealtime()
-                setState("Готов · зажмите курок")
+                setState("Готов · курок или кнопка ⇄")
                 Bus.event("Гимбал подключён")
+                rollerBase = null
+                rollerLast = null
+                // Узнаём текущую функцию колеса, чтобы потом возвращать её после нажатия ⇄
+                handler.postDelayed({ write(Ak.frame(0, 2, CMD_ROLLER)) }, 300)
             }
         }
 
@@ -265,10 +271,72 @@ class GimbalService : Service() {
     // ------------------------------------------------------------------ курок
 
     private fun onFrame(f: ByteArray) {
+        if (Ak.cmdId(f) == CMD_ROLLER && (f[2].toInt() and 0xFF) == 0) {
+            onRollerFrame(f)
+            return
+        }
         val mode = FrameParser.modeOf(f) ?: return
         val now = SystemClock.elapsedRealtime()
         lastFrameAt = now
         detector.onMode(mode, now)
+    }
+
+    // ------------------------------------------------------------------ кнопка ⇄
+
+    /** Функция колеса, которую держим постоянной (байт 0 данных cmd 129). */
+    private var rollerBase: Int? = null
+    private var rollerLast: ByteArray? = null
+    private var lastRollerPressAt = 0L
+
+    /**
+     * Кнопка ⇄ переключает функцию колеса и гимбал присылает push cmd 129.
+     * Каждое такое изменение — нажатие. Ответ на наш get (тип 4) — только запоминаем.
+     */
+    private fun onRollerFrame(f: ByteArray) {
+        val data = Ak.data(f)
+        if (data.size < 2) return
+        val target = data[0].toInt() and 0xFF
+        val type = Ak.cmdType(f)
+        if (type == 4 || type == 3) {
+            if (rollerBase == null) rollerBase = target
+            rollerLast = data
+            return
+        }
+        if (type != 0) return
+        val base = rollerBase
+        val keep = Prefs.keepKnob(this)
+        if (base != null && target == base && keep) return // эхо после нашего восстановления
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastRollerPressAt > 250) {
+            lastRollerPressAt = now
+            Bus.event("Кнопка ⇄ нажата")
+            fire(Prefs.knobButtonAction(this))
+        }
+        if (keep && base != null) {
+            val restore = data.copyOf()
+            restore[0] = base.toByte()
+            handler.postDelayed({ write(Ak.frame(0, 1, CMD_ROLLER, restore)) }, 150)
+        } else {
+            rollerBase = target
+        }
+        rollerLast = data
+    }
+
+    /** Запись кадра в FF01 без ответа. */
+    private fun write(bytes: ByteArray, retry: Boolean = true) {
+        val g = gatt ?: return
+        if (!ready) return
+        val c = g.getService(SVC)?.getCharacteristic(WRITE_CHAR) ?: return
+        val ok = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
+            } else {
+                c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                c.value = bytes
+                g.writeCharacteristic(c)
+            }
+        } catch (_: Exception) { false }
+        if (!ok && retry) handler.postDelayed({ write(bytes, false) }, 120)
     }
 
     private fun onTriggerPress() {
