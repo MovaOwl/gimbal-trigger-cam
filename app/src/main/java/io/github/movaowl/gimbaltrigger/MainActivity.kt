@@ -26,6 +26,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -55,7 +56,7 @@ import java.util.UUID
 class MainActivity : Activity() {
 
     companion object {
-        private const val APP_VERSION = "0.2-scout"
+        private const val APP_VERSION = "0.3-scout"
         private const val TELEMETRY_TYPE = "00 FF 1E 00"
         private const val REQ_PERMS = 1
         private const val MAX_SHOWN_LINES = 400
@@ -179,6 +180,7 @@ class MainActivity : Activity() {
         root.addView(row(
             button("Метка") { showMarkDialog() },
             button("Фильтр") { showMuteDialog() },
+            button("Фон заново") { if (gatt != null) startLearning() },
         ))
         root.addView(row(
             button("Поделиться") { shareLog() },
@@ -608,6 +610,7 @@ class MainActivity : Activity() {
             log("== Готово: подписан на ${notifyChars.size} канал(ов). Ставьте «Метку» и нажимайте кнопки на гимбале.")
             log("   Телеметрия углов [$TELEMETRY_TYPE] скрыта — показать можно в «Фильтре».")
             setStatus("Слушаю гимбал · каналов: ${notifyChars.size}")
+            startLearning()
             false
         }
     }
@@ -707,6 +710,7 @@ class MainActivity : Activity() {
         val type = hex(f.copyOfRange(2, 6))
         seenTypes[type] = (seenTypes[type] ?: 0) + 1
         typeCountSinceMark[type] = (typeCountSinceMark[type] ?: 0) + 1
+        if (!incomplete) watchStableBytes(type, f)
         if (type in mutedTypes) return
         val body = if (f.size > 6) hex(f.copyOfRange(6, f.size)) else ""
         if (dedupeBox.isChecked && frameLast[type] == body) {
@@ -717,6 +721,83 @@ class MainActivity : Activity() {
         val first = !frameLast.containsKey(type) && (seenTypes[type] ?: 0) == 1
         frameLast[type] = body
         log("◆ [$type] $body${if (incomplete) "  (неполный)" else ""}${if (first) "  ← новый тип" else ""}")
+    }
+
+    // ------------------------------------------------------------------ детектор «спокойных» байтов
+
+    /** Для каждого типа кадра: эталон, какие байты шумят, статистика изменений. */
+    private class TypeWatch(size: Int, first: ByteArray) {
+        var base: ByteArray = first.copyOf()
+        val noisy = BooleanArray(size)
+        var prev: ByteArray = first.copyOf()
+        val changes = IntArray(size)
+        var frames = 0
+        var lastSig = ""
+    }
+
+    private val watches = HashMap<String, TypeWatch>()
+    private var learnUntil = 0L
+
+    private fun startLearning() {
+        watches.clear()
+        learnUntil = SystemClock.elapsedRealtime() + 5000
+        log("~~ Запоминаю фон 5 секунд — держите гимбал как обычно, кнопки не трогайте")
+        handler.postDelayed({
+            if (watches.isEmpty()) {
+                log("~~ За 5 секунд не пришло ни одного кадра")
+                return@postDelayed
+            }
+            for ((t, w) in watches) {
+                val idx = w.noisy.indices.filter { w.noisy[it] }
+                log("~~ Фон [$t]: шумные байты ${if (idx.isEmpty()) "нет" else idx.joinToString(",")}; эталон ${hex(w.base)}")
+            }
+            log("~~ Готово. Теперь пишу «Δ», только когда меняется спокойный байт.")
+        }, 5100)
+    }
+
+    private fun watchStableBytes(type: String, f: ByteArray) {
+        val now = SystemClock.elapsedRealtime()
+        val w = watches[type]
+        if (w == null) {
+            watches[type] = TypeWatch(f.size, f)
+            if (now >= learnUntil && learnUntil != 0L) log("Δ [$type] новый тип кадра: ${hex(f)}")
+            return
+        }
+        if (f.size != w.base.size) {
+            log("Δ [$type] другая длина ${f.size} (было ${w.base.size}): ${hex(f)}")
+            return
+        }
+        if (now < learnUntil) {
+            for (i in f.indices) if (f[i] != w.base[i]) w.noisy[i] = true
+            w.prev = f.copyOf()
+            return
+        }
+        // Байт, который часто меняется от кадра к кадру, тоже считаем шумным
+        // (например, угол, который при обучении случайно стоял на месте).
+        for (i in f.indices) if (f[i] != w.prev[i]) w.changes[i]++
+        w.prev = f.copyOf()
+        w.frames++
+        if (w.frames >= 40) {
+            for (i in f.indices) if (!w.noisy[i] && w.changes[i] >= 10) {
+                w.noisy[i] = true
+                log("~~ [$type] байт $i оказался шумным, больше не слежу за ним")
+            }
+            w.frames = 0
+            w.changes.fill(0)
+        }
+        // Последние 3 байта — служебные (контрольная сумма), их не сравниваем.
+        val diffs = (0 until f.size - 3).filter { !w.noisy[it] && f[it] != w.base[it] }
+        val sig = diffs.joinToString(" ") { "$it:%02X".format(f[it].toInt() and 0xFF) }
+        if (sig == w.lastSig) return
+        w.lastSig = sig
+        if (diffs.isEmpty()) {
+            log("Δ [$type] вернулось к фону")
+        } else {
+            val desc = diffs.joinToString(", ") {
+                "байт $it: %02X→%02X".format(w.base[it].toInt() and 0xFF, f[it].toInt() and 0xFF)
+            }
+            log("Δ [$type] $desc   | ${hex(f)}")
+        }
     }
 
     private fun flushRepeats() {
